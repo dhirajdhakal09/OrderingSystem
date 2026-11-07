@@ -1,20 +1,19 @@
-﻿using RabbitMQ.Client;
-using RabbitMQ.Client.Events;
-
+﻿using InventoryService.Data;
+using InventoryService.Events;
 using Microsoft.EntityFrameworkCore;
+using RabbitMQ.Client;
+using RabbitMQ.Client.Events;
 using System.Text;
 using System.Text.Json;
 
-using InventoryService.Events;
-using InventoryService.Data;
-using InventoryService.Models;
-
 namespace InventoryService.Messaging
 {
-    public class RabbitMQConsumer: IRabbitMQConsumer
+    public class RabbitMQConsumer : IRabbitMQConsumer
     {
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly IConfiguration _configuration;
+
+        private const int MaxRetries = 3;
 
         public RabbitMQConsumer(
             IServiceScopeFactory scopeFactory,
@@ -63,13 +62,15 @@ namespace InventoryService.Messaging
 
                     if (orderEvent == null)
                     {
-                        await channel.BasicNackAsync(
-                            args.DeliveryTag,
-                            multiple: false,
-                            requeue: false);
+                        await MoveToDeadLetterQueue(
+                            channel,
+                            args);
 
                         return;
                     }
+
+                    // TEST ONLY
+                    //throw new Exception("TEST RETRY");
 
                     using var scope =
                         _scopeFactory.CreateScope();
@@ -96,10 +97,18 @@ namespace InventoryService.Messaging
                     if (inventory.AvailableQuantity <
                         orderEvent.Quantity)
                     {
-                        await channel.BasicNackAsync(
-                            args.DeliveryTag,
-                            multiple: false,
-                            requeue: false);
+                        Console.WriteLine(
+                            $"Insufficient inventory. " +
+                            $"Available: " +
+                            $"{inventory.AvailableQuantity}, " +
+                            $"Requested: " +
+                            $"{orderEvent.Quantity}");
+
+                        // Business failure.
+                        // Don't retry automatically.
+                        await MoveToDeadLetterQueue(
+                            channel,
+                            args);
 
                         return;
                     }
@@ -109,19 +118,22 @@ namespace InventoryService.Messaging
 
                     await dbContext.SaveChangesAsync();
 
+                    Console.WriteLine(
+                    $"Order {orderEvent.OrderId} " +
+                   $"processed successfully.");
+
                     // Tell RabbitMQ the message was processed successfully
                     await channel.BasicAckAsync(
                         args.DeliveryTag,
                         multiple: false);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Processing failed.
-                    // Requeue for now.
-                    await channel.BasicNackAsync(
-                        args.DeliveryTag,
-                        multiple: false,
-                        requeue: true);
+                    Console.WriteLine($"Error processing message: " + $"{ex.Message}");
+
+                    await HandleRetryAsync(
+                        channel,
+                        args);
                 }
             };
 
@@ -133,6 +145,109 @@ namespace InventoryService.Messaging
             await Task.Delay(
                 Timeout.Infinite,
                 cancellationToken);
+        }
+
+        private async Task HandleRetryAsync(IChannel channel, BasicDeliverEventArgs args)
+        {
+            var retryCount =
+                GetRetryCount(args);
+
+            Console.WriteLine(
+                $"Current retry count: {retryCount}");
+
+
+            if (retryCount >= MaxRetries)
+            {
+                Console.WriteLine(
+                    "Maximum retries reached. " +
+                    "Moving message to DLQ.");
+
+                await MoveToDeadLetterQueue(
+                    channel,
+                    args);
+
+                return;
+            }
+
+
+            // Increase retry count
+            var nextRetryCount =
+                retryCount + 1;
+
+
+            var properties =
+                new BasicProperties
+                {
+                    Persistent = true,
+                    Headers =
+                        new Dictionary<string, object?>
+                        {
+                            ["x-retry-count"] =
+                                nextRetryCount
+                        }
+                };
+
+
+            // Publish message to retry queue
+            await channel.BasicPublishAsync(
+                exchange: "",
+                routingKey: "order-retry",
+                mandatory: false,
+                basicProperties: properties,
+                body: args.Body.ToArray());
+
+
+            Console.WriteLine(
+                $"Message moved to retry queue. " +
+                $"Retry #{nextRetryCount}");
+
+
+            // ACK the original message.
+            //
+            // We ACK because we successfully transferred
+            // the message to the retry queue.
+            await channel.BasicAckAsync(
+                args.DeliveryTag,
+                multiple: false);
+        }
+
+
+        private static int GetRetryCount(
+    BasicDeliverEventArgs args)
+        {
+            if (args.BasicProperties.Headers == null)
+                return 0;
+
+            if (!args.BasicProperties.Headers.TryGetValue(
+                    "x-retry-count",
+                    out var value))
+            {
+                return 0;
+            }
+
+            if (value is byte[] bytes &&
+                int.TryParse(
+                    Encoding.UTF8.GetString(bytes),
+                    out var byteResult))
+            {
+                return byteResult;
+            }
+
+            if (value is int intValue)
+                return intValue;
+
+            return 0;
+        }
+
+
+        private static async Task MoveToDeadLetterQueue(
+            IChannel channel,
+            BasicDeliverEventArgs args)
+        {
+            await channel.BasicNackAsync(
+                args.DeliveryTag,
+                multiple: false,
+                requeue: false);
         }
     }
 }

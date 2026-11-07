@@ -9,6 +9,7 @@ namespace OrderService.Data
         }
 
         public DbSet<Order> Orders { get; set; } = null!;
+        public DbSet<OutboxMessage> OutboxMessages { get; set; }
     }
 
     public class Order
@@ -20,5 +21,21 @@ namespace OrderService.Data
         public int Quantity { get; set; }
 
         public DateTime? CreatedAt { get; set; }
+    }
+
+    public class OutboxMessage
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+
+        public string Type { get; set; } = string.Empty;
+
+        public string Payload { get; set; } = string.Empty;
+
+        public DateTime OccurredOnUtc { get; set; } =
+            DateTime.UtcNow;
+
+        public DateTime? ProcessedOnUtc { get; set; }
+
+        public string? Error { get; set; }
     }
 }

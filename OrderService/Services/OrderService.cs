@@ -2,10 +2,11 @@ using Microsoft.EntityFrameworkCore;
 using OrderService.Data;
 using OrderService.Events;
 using OrderService.Messaging;
+using System.Text.Json;
 
 namespace OrderService.Services
 {
-    public class OrderService: IOrderService
+    public class OrderService : IOrderService
     {
         private readonly IRabbitMQPublisher _rabbitMQPublisher;
         private readonly OrderDbContext _context;
@@ -17,26 +18,61 @@ namespace OrderService.Services
         }
         public async Task<Order> CreateOrderAsync(Order order)
         {
-            order.CreatedAt = DateTime.UtcNow;
+            await using var transaction = await _context.Database.BeginTransactionAsync();
 
-            // 1. Save Order to SQL
-            _context.Orders.Add(order);
-
-            await _context.SaveChangesAsync();
-
-            // 2. Publish event AFTER SQL succeeds
-            var orderCreatedEvent = new OrderCreatedEvent
+            try
             {
-                OrderId = order.Id,
-                ProductId = order.ProductId,
-                Quantity = order.Quantity
-            };
 
-            await _rabbitMQPublisher.PublishAsync(
-                orderCreatedEvent,
-                "order-created");
+                order.CreatedAt = DateTime.UtcNow;
 
-            return order;
+                // 1. Save Order to SQL
+                _context.Orders.Add(order);
+
+                await _context.SaveChangesAsync();
+
+                var eventGuid = Guid.NewGuid();
+                // 2. Publish event AFTER SQL succeeds
+                var orderCreatedEvent = new OrderCreatedEvent
+                {
+                    EventId = eventGuid,
+                    OrderId = order.Id,
+                    ProductId = order.ProductId,
+                    Quantity = order.Quantity
+                };
+
+                //await _rabbitMQPublisher.PublishAsync(
+                //    orderCreatedEvent,
+                //    "order-created");
+
+                //return order;
+                // 3. Store the event in the outbox.
+                var outboxMessage = new OutboxMessage
+                {
+                    Id = eventGuid,
+                    Type = nameof(OrderCreatedEvent),
+                    Payload = JsonSerializer.Serialize(orderCreatedEvent),
+                    OccurredOnUtc = DateTime.UtcNow
+                };
+
+                _context.OutboxMessages.Add(outboxMessage);
+
+                await _context.SaveChangesAsync();
+
+                // 4. Commit both database changes together.
+                await transaction.CommitAsync();
+
+                // 5. Do NOT publish to RabbitMQ here.
+                // The background worker will publish the event.
+
+                return order;
+
+            }
+            catch(Exception ex)
+            {
+                await transaction.RollbackAsync();
+                throw;
+            }
+
         }
     }
 }

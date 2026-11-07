@@ -10,5 +10,16 @@ namespace InventoryService.Data
         }
 
         public DbSet<InventoryItem> InventoryItems { get; set; } = null!;
+
+        public DbSet<InboxMessage> InboxMessages { get; set; }
+
+        protected override void OnModelCreating(
+            ModelBuilder modelBuilder)
+        {
+            base.OnModelCreating(modelBuilder);
+
+            modelBuilder.Entity<InboxMessage>()
+                .HasKey(x => x.EventId);
+        }
     }
 }

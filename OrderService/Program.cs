@@ -21,6 +21,8 @@ builder.Services.AddDbContext<OrderDbContext>(options => options.UseSqlServer(or
 builder.Services.AddScoped<IRabbitMQPublisher, RabbitMQPublisher>();
 builder.Services.AddScoped<IOrderService, OrderService.Services.OrderService>();
 
+builder.Services.AddHostedService<OutboxBackgroundService>();
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
